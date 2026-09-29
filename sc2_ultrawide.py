@@ -13,13 +13,14 @@ is gone when the game closes.
 
 The bottom console is three 3D models (minimap, unit info, command card) pinned to the left
 edge, the center and the right edge and sized by the screen height, so past 16:9 they drift
-apart and leave gaps. `watch` widens the middle model at every mission load so each of its
-ends sits where it would at 16:9, measured from its own screen edge, which closes the gaps.
+apart and leave gaps. The game rebuilds the console at every mission load, so `apply` also
+starts a small background helper that widens the middle model each time, putting each of its
+ends where it would sit at 16:9, measured from its own screen edge. The helper stops when the
+game closes or the window goes back to 16:9.
 
 Commands:
     python sc2_ultrawide.py status      show build, window size, widescreen and console state
-    python sc2_ultrawide.py apply       widen the window to the full monitor
-    python sc2_ultrawide.py watch       widen the window, then keep the bottom console framed
+    python sc2_ultrawide.py apply       widen the window and keep the bottom console framed
     python sc2_ultrawide.py revert      resize the window back to 16:9 and put the console back
 
 Only Windowed (Fullscreen) display mode is affected. Exclusive fullscreen keeps its own,
@@ -31,8 +32,11 @@ and you accept that risk yourself.
 import argparse
 import ctypes
 import ctypes.wintypes as wt
+import os
 import re
 import struct
+import subprocess
+import sys
 import time
 
 GAME_EXE = "SC2_x64.exe"
@@ -71,6 +75,9 @@ ENTRY_INSTANCE, ENTRY_POSITION, ENTRY_SCALE = 0x20, 0x28, 0x34
 INSTANCE_MODEL, MODEL_BOUNDS = 0x150, 0x430   # instance -> model data -> min(x,y,z), max(x,y,z)
 CONSOLE_DEFAULT = (0.0, 1.0)       # middle piece position.x and scale.x in the console skins
 
+HELPER_FLAG = "--console-helper"   # internal: run as the background console helper
+HELPER_MUTEX = "sc2_ultrawide_console_helper"
+
 PROCESS_VM_OPERATION = 0x0008
 PROCESS_VM_READ = 0x0010
 PROCESS_VM_WRITE = 0x0020
@@ -84,6 +91,10 @@ SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 SWP_ASYNCWINDOWPOS = 0x4000
 MONITOR_DEFAULTTONEAREST = 2
+SYNCHRONIZE = 0x00100000
+ERROR_ALREADY_EXISTS = 183
+DETACHED_PROCESS = 0x00000008
+CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -126,6 +137,10 @@ kernel32.WriteProcessMemory.argtypes = [
 kernel32.VirtualProtectEx.argtypes = [
     wt.HANDLE, ctypes.c_void_p, ctypes.c_size_t, wt.DWORD, ctypes.POINTER(wt.DWORD)]
 kernel32.CloseHandle.argtypes = [wt.HANDLE]
+kernel32.CreateMutexW.restype = wt.HANDLE
+kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wt.BOOL, wt.LPCWSTR]
+kernel32.OpenMutexW.restype = wt.HANDLE
+kernel32.OpenMutexW.argtypes = [wt.DWORD, wt.BOOL, wt.LPCWSTR]
 user32.EnumWindows.argtypes = [ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM), wt.LPARAM]
 user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
 user32.IsWindowVisible.argtypes = [wt.HWND]
@@ -434,8 +449,54 @@ def console_state(game, hwnd):
     if same(current, wanted):
         return "normal" if same(wanted, CONSOLE_DEFAULT) else f"framed (middle piece widened {current[1]:.2f}x)"
     if same(current, CONSOLE_DEFAULT):
-        return "gaps between the pieces (run watch)"
-    return "widened for a different window size (run watch or revert)"
+        return "gaps between the pieces (run apply)"
+    return "widened for a different window size (run apply or revert)"
+
+
+def helper_running():
+    handle = kernel32.OpenMutexW(SYNCHRONIZE, False, HELPER_MUTEX)
+    if handle:
+        kernel32.CloseHandle(handle)
+    return bool(handle)
+
+
+def start_helper():
+    """Start the console helper as a detached background process with no window."""
+    return subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), HELPER_FLAG],
+        creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, close_fds=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def run_helper():
+    """Refit the bottom console after every mission load while the window is wide.
+
+    Stops when the game closes or the window is no longer wide (after `revert`, or when the game
+    enforces 16:9 again, in which case the console is put back first). A named mutex keeps it to
+    one copy.
+    """
+    ctypes.set_last_error(0)
+    mutex = kernel32.CreateMutexW(None, False, HELPER_MUTEX)
+    if not mutex:
+        return
+    try:
+        if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+            return
+        game = Game()
+        try:
+            hwnd = game.window()
+            while hwnd and user32.IsWindow(hwnd) and is_wide(hwnd):
+                try:
+                    fix_console(game, hwnd)
+                except (Exception, SystemExit):
+                    pass
+                time.sleep(1.0)
+            if hwnd and user32.IsWindow(hwnd):
+                fix_console(game, hwnd)
+        finally:
+            game.close()
+    finally:
+        kernel32.CloseHandle(mutex)
 
 
 def print_status(game):
@@ -453,16 +514,19 @@ def print_status(game):
     print(f"engine stored size: {sw}x{sh}")
     if hwnd and game.build == BUILD:
         print(f"bottom console: {console_state(game, hwnd)}")
+    print(f"console helper: {'running' if helper_running() else 'not running'}")
 
 
 def main():
     ctypes.windll.user32.SetProcessDPIAware()
+    if sys.argv[1:] == [HELPER_FLAG]:
+        run_helper()
+        return
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status", help="show build, window size, widescreen and console state")
-    sub.add_parser("apply", help="widen the window to the full monitor")
-    sub.add_parser("watch", help="widen the window, then keep the bottom console framed until the game closes")
+    sub.add_parser("apply", help="widen the window and keep the bottom console framed until the game closes")
     sub.add_parser("revert", help="resize the window back to 16:9 and put the console back")
     args = parser.parse_args()
 
@@ -483,28 +547,11 @@ def main():
             cw, ch = window_size(hwnd)
             print(f"apply: window {cw}x{ch} ({'ok' if accepted else 'not accepted'}), "
                   f"flags set for {ms:.0f} ms")
-        elif args.cmd == "watch":
-            if not is_wide(hwnd):
-                writer = Game(write=True)
-                try:
-                    accepted, ms = set_window(writer, hwnd, mw, mh, bypass=True)
-                finally:
-                    writer.close()
-                cw, ch = window_size(hwnd)
-                print(f"watch: window {cw}x{ch} ({'ok' if accepted else 'not accepted'}), "
-                      f"flags set for {ms:.0f} ms")
-            print("watch: keeping the bottom console framed. Leave this open while you play; Ctrl+C stops it.")
-            try:
-                while user32.IsWindow(hwnd):
-                    written = fix_console(game, hwnd)
-                    if written:
-                        cw, ch = window_size(hwnd)
-                        print(f"{time.strftime('%H:%M:%S')} bottom console fitted to {cw}x{ch} "
-                              f"(middle piece {written[1]:.2f}x wide)")
-                    time.sleep(1.0)
-                print("watch: StarCraft II closed.")
-            except KeyboardInterrupt:
-                print("watch: stopped. The console stays as it is until the next mission loads.")
+            if helper_running():
+                print("apply: the console helper is already running.")
+            elif is_wide(hwnd):
+                start_helper()
+                print("apply: a background helper keeps the bottom console framed until StarCraft II closes.")
         elif args.cmd == "revert":
             width = round(mh * ORIGINAL_MAX_ASPECT)
             accepted, _ = set_window(game, hwnd, width, mh, bypass=False, timeout=3.0)
