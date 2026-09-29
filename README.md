@@ -148,10 +148,6 @@ Reading memory never needs write access, so the parts that only read cannot chan
 - Exclusive fullscreen is not supported. The Fullscreen display mode has its own 16:9 limit with no exception, so use Windowed (Fullscreen).
 - Only game build 97563 is supported. On any other build, `status` still reports the aspect limit, but `apply` stops before it writes anything, because the writable addresses match build 97563 only. The addresses at the top of `sc2_ultrawide.py` (`LISTEN_OBJECT` through `STORED_HEIGHT`) would need to be found again for the new build.
 
-## TODO
-
-- [ ] HUD: fill in the bottom console framing at ultrawide sizes. One attempt moved the whole console into a centered 16:9 area. That worked, but it looked worse, because the dark band under the console still stretched across the full width. Not tried yet: stretching the plain middle part of the console art to cover the gaps, or making the game draw the battlefield underneath the console. The game rebuilds the HUD every time a mission loads, so a fix would need to re-apply itself each time.
-
 ## Credits
 
 Researched and built with Claude Opus 5.5.
