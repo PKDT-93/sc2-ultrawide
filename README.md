@@ -33,7 +33,7 @@ The bottom console fix was tested at 5120×1440, 3440×1440 and 2560×1080.
 ## Requirements
 
 - Windows, 64-bit (tested on Windows 11)
-- StarCraft II build 97563 (patch 5.0.16), 64-bit client. Other builds are not supported without updating the addresses in the script; see [known issues](#known-issues).
+- StarCraft II 64-bit client. Tested on build 97563 (patch 5.0.16). The tool finds the memory it needs in the running game each time, so it should keep working after a patch; see [known issues](#known-issues).
 - Python 3 (tested with 3.14). The script uses only the standard library.
 - Display Mode set to Windowed (Fullscreen)
 
@@ -85,7 +85,7 @@ If something goes wrong:
 |---|---|
 | `'python' is not recognized` or the Microsoft Store opens | Python is not on your PATH. Reinstall it and tick "Add python.exe to PATH". |
 | `SC2_x64.exe is not running` or `Game window not found` | Start StarCraft II, wait for the main menu, then run the command again. |
-| The script says the build is not supported | Your game version is not 97563. See [known issues](#known-issues). |
+| The script says it could not find the memory it needs | A game patch changed that part of the game. See [known issues](#known-issues). |
 | An "access denied" message | Close PowerShell, search for it in the Start menu, right-click it, choose **Run as administrator**, then `cd` into the folder and run the command again. |
 
 ### Every time you play
@@ -133,7 +133,7 @@ The window-sizing code has an exception, though. Before it measures anything, it
 
 So `sc2_ultrawide.py apply` does the following:
 
-1. Confirms the game build and reads both settings back by name, so it stops before writing anything if the game's memory does not look the way it expects.
+1. Finds both settings in the running game and reads each one back by name, so it stops before writing anything if the game's memory does not look the way it expects.
 2. Switches both settings on, resizes the game window to fill the monitor with `SetWindowPos`, and waits until the game has stored the new size.
 3. Restores both settings to their original bytes.
 
@@ -149,6 +149,16 @@ Each model has a position and a scale in memory, and its frame has a flag that t
 
 These objects were found in the same read-only memory copy. A list of every UI frame in the running game showed that no flat image covered the gaps, which led to the three model frames (`MinimapModel`, `InfopanelModel`, `CommandPanelModel`). Their settings and the code that places each model came from the disassembled game code.
 
+### Finding the addresses on each run
+
+Every memory address the tool writes to moves when Blizzard ships a new build, so none of them are stored in the script. Each run reads the game's code from memory and finds them by recognizing the code that uses them:
+
+- The window-size check, the same code `status` uses to find the aspect limit, reads the engine's stored window size and the display mode in its first few instructions. It also calls a small function that checks the two client-API settings, and each of those settings is read by a one-line function, which gives its address.
+- Each setting's owner is then found by name (`listen`, `gameStateRender` and `displaymode`) just before its value, which also confirms the address is right.
+- For the console, the game UI pointer is the value the game loads most often right before it reads its console panel. The console panel field is where the game stores the result of looking up `UIContainer/ConsolePanel`, and the middle model frame is recognized by its name, `InfopanelModel`.
+
+If any of these does not match exactly once, the tool stops before writing and names the one it could not find. Finding everything takes about a third of a second.
+
 APIs and tools used:
 
 - Windows process and memory: `OpenProcess`, `CreateToolhelp32Snapshot`, `Module32FirstW`, `VirtualQueryEx`, `ReadProcessMemory`, `VirtualProtectEx` and `WriteProcessMemory` for the two settings, and `WriteProcessMemory` alone for the console.
@@ -160,7 +170,7 @@ Reading memory never needs write access, so the parts that only read cannot chan
 
 ## Known issues
 - Exclusive fullscreen is not supported. The Fullscreen display mode has its own 16:9 limit with no exception, so use Windowed (Fullscreen).
-- Only game build 97563 is supported. On any other build, `status` still reports the aspect limit, but `apply` and `revert` stop before they write anything, because the writable addresses match build 97563 only. The addresses near the top of `sc2_ultrawide.py` (`LISTEN_OBJECT` through `MODEL_BOUNDS`) would need to be found again for the new build.
+- Only build 97563 has been tested. The tool does not store any memory addresses; each run finds them by recognizing the game code that uses them, so a new patch should work without an update. If a patch changes that code, `apply` and `revert` stop before they write anything and name the part they could not find. The offsets inside the console's model objects (near the top of `sc2_ultrawide.py`) are still fixed, but they only change if Blizzard changes those objects, and a mismatch makes the tool leave the console alone.
 - The stretched middle piece of the console looks a little smoother and darker than the pieces beside it, because its texture is spread several times wider.
 
 ## Credits

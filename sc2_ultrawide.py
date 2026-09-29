@@ -11,6 +11,10 @@ flags for a few milliseconds, resizes the game window to fill the monitor so the
 accepts the new size, then restores the flags. Nothing on disk changes and the widened size
 is gone when the game closes.
 
+None of the memory addresses are hard-coded. Each run finds them in the running game by
+recognizing the code that uses them, and reads each setting back by name before writing, so a
+game patch does not need a manual update unless it changes that code.
+
 The bottom console is three 3D models (minimap, unit info, command card) pinned to the left
 edge, the center and the right edge and sized by the screen height, so past 16:9 they drift
 apart and leave gaps. The game rebuilds the console at every mission load, so `apply` also
@@ -40,7 +44,7 @@ import sys
 import time
 
 GAME_EXE = "SC2_x64.exe"
-BUILD = "97563"
+BUILD = "97563"                    # the build this was tested on (addresses are found at run time)
 ORIGINAL_MAX_ASPECT = struct.unpack("<f", struct.pack("<I", 0x3FE3AAAB))[0]  # 1366 / 768
 
 # Read-only aspect-ratio cap, found by signature (build independent). Used for `status` only;
@@ -52,28 +56,26 @@ CAP_SIGNATURES = [
      "0F 29 B4 24 D0 00 00 00 F3 0F 10 35 ?? ?? ?? ?? 0F 29 BC 24 C0 00 00 00 F3 0F 10 3D", 12, 16),
 ]
 
-# Writable .data addresses for build 97563. Guarded at runtime by the option-name check below,
-# so a different build (where these move) fails safe instead of writing to the wrong place.
-LISTEN_OBJECT = 0x3A0DB10          # engine option "listen"; its value dword sits at +0x70
-LISTEN_VALUE = 0x3A0DB80
-RENDER_OBJECT = 0x43CB460          # engine option "gameStateRender"; its value byte at +0x61
-RENDER_VALUE = 0x43CB4C1
-STORED_WIDTH = 0x581452C           # last window client width the engine accepted
-STORED_HEIGHT = 0x581039C
+# The addresses the tool writes to move with every game patch, so they are not hard-coded.
+# find_addresses() locates them in the running game by code pattern (see the resolver below) and
+# verifies each option by reading its name back, so a build where a pattern no longer matches
+# fails safe (the tool refuses to write) instead of writing to the wrong place.
 
-# Bottom console, build 97563. These are heap objects rebuilt at every mission load, so they are
-# looked up fresh each time and checked by vtable before anything is written.
-GAMEUI_POINTER = 0x4032368         # .data pointer to the game UI object
-GAMEUI_CONSOLE_PANEL = 0xC60       # game UI -> ConsolePanel frame
-PANEL_CENTER_MODEL = 0x138         # ConsolePanel -> model frame that draws the middle console piece
-MODEL_FRAME_VTABLE = 0x2ED5410
-MODEL_FRAME_FLAGS = 0x214
-TRANSFORMS_DIRTY = 0x04            # model frame flag: rebuild model transforms on the next frame
+# Struct field offsets inside the game's UI and model classes. These only shift if Blizzard
+# changes a class layout, which is rare; a change is caught by the runtime checks (a wrong offset
+# makes a name lookup or a plausibility test fail, and nothing is written).
+DISPLAY_WINDOWED = 1               # displaymode value for Windowed (Fullscreen)
+FRAME_LAYOUT_NODE = 0x08           # UI frame -> its layout node
+NODE_NAME = 0x58                   # layout node -> interned name entry
+NAME_CHARS = 0x20                  # name entry -> first character of the name
+CONSOLE_MIDDLE_FRAME = "InfopanelModel"   # the model frame that draws the middle console piece
+MODEL_FRAME_FLAGS = 0x214          # model frame flags dword
+TRANSFORMS_DIRTY = 0x04            # ...its bit that makes the engine rebuild the model transform
 MODEL_FRAME_BUCKETS = 0x1F0        # model list: bucket count here, bucket array pointer at +0x10
-MODEL_ENTRY_VTABLE = 0x2ED5400
-ENTRY_INSTANCE, ENTRY_POSITION, ENTRY_SCALE = 0x20, 0x28, 0x34
+ENTRY_INSTANCE, ENTRY_POSITION, ENTRY_SCALE = 0x20, 0x28, 0x34   # model entry fields
 INSTANCE_MODEL, MODEL_BOUNDS = 0x150, 0x430   # instance -> model data -> min(x,y,z), max(x,y,z)
 CONSOLE_DEFAULT = (0.0, 1.0)       # middle piece position.x and scale.x in the console skins
+IDENT = re.compile(rb"[A-Za-z][A-Za-z0-9_]{1,63}\0")
 
 HELPER_FLAG = "--console-helper"   # internal: run as the background console helper
 HELPER_MUTEX = "sc2_ultrawide_console_helper"
@@ -167,6 +169,8 @@ class Game:
             raise ctypes.WinError(ctypes.get_last_error())
         self.base, self.size, self.path = self._find_module()
         self.build = next(iter(re.findall(r"Base(\d+)", self.path)), "unknown")
+        self.addr = None
+        self._sections = {}
 
     def close(self):
         kernel32.CloseHandle(self.handle)
@@ -241,7 +245,10 @@ class Game:
             restored = wt.DWORD()
             kernel32.VirtualProtectEx(self.handle, addr, len(data), old.value, ctypes.byref(restored))
 
-    def text_section(self):
+    def section(self, name):
+        """Return (rva, bytes) of a whole PE section, read once and cached."""
+        if name in self._sections:
+            return self._sections[name]
         headers = self.read(0, 0x1000)
         e_lfanew = struct.unpack_from("<I", headers, 0x3C)[0]
         count = struct.unpack_from("<H", headers, e_lfanew + 6)[0]
@@ -249,16 +256,16 @@ class Game:
         table = e_lfanew + 24 + opt_size
         for i in range(count):
             off = table + 40 * i
-            if headers[off: off + 5] == b".text":
+            if headers[off: off + 8].rstrip(b"\0") == name.encode():
                 vsize, rva = struct.unpack_from("<II", headers, off + 8)
-                return rva, vsize
-        raise RuntimeError("no .text section found")
+                data = b"".join(self.read(rva + o, min(0x400000, vsize - o)) for o in range(0, vsize, 0x400000))
+                self._sections[name] = (rva, data)
+                return self._sections[name]
+        raise RuntimeError(f"no {name} section found")
 
     def locate_cap(self):
         """Return (rva, sites) for the read-only aspect cap, found via its code references."""
-        text_rva, text_size = self.text_section()
-        code = b"".join(self.read(text_rva + off, min(0x400000, text_size - off))
-                        for off in range(0, text_size, 0x400000))
+        text_rva, code = self.section(".text")
         sites, targets = {}, set()
         for name, pattern, disp_off, next_off in CAP_SIGNATURES:
             rx = re.compile(b"".join(b"." if t == "??" else re.escape(bytes([int(t, 16)]))
@@ -321,14 +328,147 @@ def window_size(hwnd):
     return rect.right - rect.left, rect.bottom - rect.top
 
 
-def check_build(game):
-    if game.build != BUILD:
-        raise SystemExit(
-            f"This build is {game.build}; the writable addresses in this tool are for {BUILD}. "
-            f"Update them for your build before applying.")
-    names = game.option_name(LISTEN_OBJECT), game.option_name(RENDER_OBJECT)
-    if names != ("listen", "gameStateRender"):
-        raise SystemExit(f"Option layout check failed (found {names}); not writing to memory.")
+class Addresses:
+    """Build-specific addresses found in the running game by find_addresses()."""
+
+    def __init__(self, listen_value, render_value, stored_width, stored_height, display_mode):
+        self.listen_value, self.render_value = listen_value, render_value
+        self.stored_width, self.stored_height = stored_width, stored_height
+        self.display_mode = display_mode
+        self.console = False       # set once the console addresses below are found
+        self.console_error = None
+        self.gameui_pointer = self.gameui_console_panel = None
+        self.panel_center_model = self.model_entry_vtable = None
+
+
+def rel32(blob, at):
+    """Offset (within blob) that a rel32 / rip-relative operand stored at `at` points to."""
+    return at + 4 + struct.unpack_from("<i", blob, at)[0]
+
+
+def only(what, hits):
+    hits = list(hits)
+    if len(hits) != 1:
+        raise LookupError(f"{what} ({len(hits)} matches, expected 1)")
+    return hits[0]
+
+
+def option_object(game, value_rva, name):
+    """The engine option object named `name` that owns the value at value_rva (it sits just before)."""
+    for obj in range(value_rva & ~7, ((value_rva - 0x100) & ~7) - 8, -8):
+        if game.option_name(obj) == name:
+            return obj
+    raise LookupError(f"the {name!r} option (no object with that name before its value)")
+
+
+def resolve_window(game):
+    """Addresses used to widen the window. Anchored on the window-size check, which reads them."""
+    text_rva, text = game.section(".text")
+    # The window-size check: calls the client-API check, then reads the stored width and height
+    # and compares the display mode with 1 before it applies the aspect cap.
+    m = only("the window-size check", re.finditer(
+        rb"\xe8(.{4})\x84\xc0\x74.\xb0\x01\x48\x83\xc4.\x5f\x5e\xc3"
+        rb"\x8b\x05(.{4}).{0,48}?\x8b\x05(.{4}).{0,64}?\x83\x3d(.{4})\x01", text, re.DOTALL))
+    client_api = text_rva + rel32(text, m.start(1))
+    stored_width = text_rva + rel32(text, m.start(2))
+    stored_height = text_rva + rel32(text, m.start(3))
+    display_mode = text_rva + m.start(4) + 5 + struct.unpack_from("<i", text, m.start(4))[0]
+
+    def at(rva, size):
+        return text[rva - text_rva: rva - text_rva + size]
+
+    # The client-API check calls two one-line getters: `listen` (dword) and `gameStateRender` (byte).
+    body = re.match(rb"\x48\x83\xec.\xe8(.{4})\x84\xc0\x74.\xe8(.{4})\x84\xc0", at(client_api, 32), re.DOTALL)
+    if not body:
+        raise LookupError("the client-API check")
+    listen_fn = client_api + rel32(at(client_api, 32), body.start(1))
+    render_fn = client_api + rel32(at(client_api, 32), body.start(2))
+    lg = re.match(rb"\xf7\x05(.{4})\xfc\xff\xff\xff\x0f\x95\xc0\xc3", at(listen_fn, 16), re.DOTALL)
+    rg = re.match(rb"\x0f\xb6\x05(.{4})\xc3", at(render_fn, 8), re.DOTALL)
+    if not lg or not rg:
+        raise LookupError("the listen / gameStateRender getters")
+    listen_value = listen_fn + 10 + struct.unpack_from("<i", lg.group(1))[0]
+    render_value = render_fn + 7 + struct.unpack_from("<i", rg.group(1))[0]
+    for value, name in ((listen_value, "listen"), (render_value, "gameStateRender"), (display_mode, "displaymode")):
+        option_object(game, value, name)
+    return Addresses(listen_value, render_value, stored_width, stored_height, display_mode)
+
+
+def resolve_console(game):
+    """Addresses used to fit the bottom console. Returns a tuple, or raises LookupError."""
+    text_rva, text = game.section(".text")
+    rdata_rva, rdata = game.section(".rdata")
+    k = rdata.find(b"\0UIContainer/ConsolePanel\0")
+    if k < 0:
+        raise LookupError("the ConsolePanel layout path")
+    path = rdata_rva + k + 1
+    # The game UI stores the ConsolePanel frame in a field right after looking up its layout path.
+    ref = only("the ConsolePanel path reference",
+               (i for i in (m.start() for m in re.finditer(rb"\x48\x8d[\x05\x0d]", text))
+                if text_rva + rel32(text, i + 3) == path))
+    store = re.search(rb"\x48\x89\x83(.{4})", text[ref + 7: ref + 7 + 0x60], re.DOTALL)
+    if not store:
+        raise LookupError("the ConsolePanel field")
+    panel_field = struct.unpack_from("<I", store.group(1))[0]
+    # The game UI global: the rip-relative pointer loaded most often right before that field is read.
+    votes = {}
+    for m in re.finditer(rb"\x48\x8b[\x05\x0d](.{4}).{0,16}?\x48\x8b[\x88\x89]"
+                         + re.escape(struct.pack("<I", panel_field)), text, re.DOTALL):
+        g = text_rva + rel32(text, m.start(1))
+        votes[g] = votes.get(g, 0) + 1
+    ranked = sorted(votes.items(), key=lambda kv: -kv[1])
+    if not ranked or ranked[0][1] < 3 or (len(ranked) > 1 and ranked[1][1] * 2 > ranked[0][1]):
+        raise LookupError(f"the game UI pointer (votes {ranked[:3]})")
+    gameui = ranked[0][0]
+    # The ConsolePanel's three model frames are read in a row, 8 bytes apart; the middle one is ours.
+    trip = [(text_rva + m.start(), m) for m in
+            re.finditer(rb"\x8b\x93(.{4})\x48\x8b\x8b(.{4})\xe8(.{4})", text, re.DOTALL)]
+    middles = set()
+    for (a1, m1), (a2, m2), (a3, m3) in zip(trip, trip[1:], trip[2:]):
+        if a3 - a1 > 0x80:
+            continue
+        f = [struct.unpack_from("<I", x.group(2))[0] for x in (m1, m2, m3)]
+        e = [struct.unpack_from("<I", x.group(1))[0] for x in (m1, m2, m3)]
+        calls = {a + 18 + struct.unpack_from("<i", x.group(3))[0] for a, x in ((a1, m1), (a2, m2), (a3, m3))}
+        if f[1] - f[0] == f[2] - f[1] == 8 and e[1] - e[0] == e[2] - e[1] == 4 and len(calls) == 1:
+            middles.add(f[1])
+    middle = only("the console model fields", middles)
+    # A model entry's vtable: stored just before the entry's scale is set to its default of 1.0.
+    vtables = set()
+    for m in re.finditer(rb"\xc7\x43\x34\x00\x00\x80\x3f\xc7\x43\x38\x00\x00\x80\x3f", text, re.DOTALL):
+        window = text[m.start() - 0x40: m.start()]
+        leas = list(re.finditer(rb"\x48\x8d\x05(.{4})\x48\x89\x03", window, re.DOTALL))
+        if leas:
+            vtables.add(text_rva + m.start() - 0x40 + rel32(window, leas[-1].start(1)))
+    entry_vtable = only("the model entry vtable", vtables)
+    return gameui, panel_field, middle, entry_vtable
+
+
+def find_addresses(game):
+    """Locate every build-specific address in the running game and store them on game.addr.
+
+    The window addresses are required (LookupError if missing). The console addresses are optional:
+    if they cannot be found, game.addr.console stays False and the console is left alone.
+    """
+    game.addr = resolve_window(game)
+    try:
+        (game.addr.gameui_pointer, game.addr.gameui_console_panel,
+         game.addr.panel_center_model, game.addr.model_entry_vtable) = resolve_console(game)
+        game.addr.console = True
+    except LookupError as e:
+        game.addr.console_error = str(e)
+    return game.addr
+
+
+def frame_name(game, frame):
+    """A UI frame's name from its layout node, or None."""
+    try:
+        node = game.read_abs_u64(frame + FRAME_LAYOUT_NODE)
+        entry = game.read_abs_u64(node + NODE_NAME) if node else 0
+        m = IDENT.match(game.read_abs(entry + NAME_CHARS, 0x44)) if entry else None
+    except OSError:
+        return None
+    return m.group(0)[:-1].decode() if m else None
 
 
 def set_window(game, hwnd, width, height, bypass, timeout=10.0):
@@ -337,29 +477,30 @@ def set_window(game, hwnd, width, height, bypass, timeout=10.0):
     Returns (accepted, milliseconds_flags_were_set). `accepted` means the engine stored the
     exact size requested.
     """
+    a = game.addr
     mx, my, mw, mh = monitor_rect(hwnd)
     x, y = mx + (mw - width) // 2, my + (mh - height) // 2
-    orig_listen = game.read(LISTEN_VALUE, 16)
-    orig_render = game.read(RENDER_VALUE, 1)
+    orig_listen = game.read(a.listen_value, 16)
+    orig_render = game.read(a.render_value, 1)
     t0 = time.perf_counter()
     accepted = False
     try:
         if bypass:
-            game.write(LISTEN_VALUE + 8, b"x\0")
-            game.write(LISTEN_VALUE, struct.pack("<I", 0x05))
-            game.write(RENDER_VALUE, b"\x01")
+            game.write(a.listen_value + 8, b"x\0")
+            game.write(a.listen_value, struct.pack("<I", 0x05))
+            game.write(a.render_value, b"\x01")
         user32.SetWindowPos(hwnd, None, x, y, width, height,
                             SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS)
         while time.perf_counter() - t0 < timeout:
-            if (game.read_u32(STORED_WIDTH), game.read_u32(STORED_HEIGHT)) == (width, height):
+            if (game.read_u32(a.stored_width), game.read_u32(a.stored_height)) == (width, height):
                 accepted = True
                 break
             time.sleep(0.002)
     finally:
         if bypass:
-            game.write(LISTEN_VALUE, orig_listen[:4])
-            game.write(LISTEN_VALUE + 8, orig_listen[8:])
-            game.write(RENDER_VALUE, orig_render)
+            game.write(a.listen_value, orig_listen[:4])
+            game.write(a.listen_value + 8, orig_listen[8:])
+            game.write(a.render_value, orig_render)
     return accepted, (time.perf_counter() - t0) * 1000
 
 
@@ -390,11 +531,14 @@ def console_plan(game, hwnd, restore=False):
 
     `current` and `wanted` are (position.x, scale.x) pairs.
     """
+    a = game.addr
+    if not a or not a.console:
+        return None
     try:
-        ui = struct.unpack("<Q", game.read(GAMEUI_POINTER, 8))[0]
-        panel = game.read_abs_u64(ui + GAMEUI_CONSOLE_PANEL)
-        frame = game.read_abs_u64(panel + PANEL_CENTER_MODEL) & ~1
-        if game.read_abs_u64(frame) != game.base + MODEL_FRAME_VTABLE:
+        ui = struct.unpack("<Q", game.read(a.gameui_pointer, 8))[0]
+        panel = game.read_abs_u64(ui + a.gameui_console_panel)
+        frame = game.read_abs_u64(panel + a.panel_center_model) & ~1
+        if frame_name(game, frame) != CONSOLE_MIDDLE_FRAME:
             return None
         count = struct.unpack("<I", game.read_abs(frame + MODEL_FRAME_BUCKETS, 4))[0]
         buckets = game.read_abs_u64(frame + MODEL_FRAME_BUCKETS + 0x10)
@@ -404,7 +548,7 @@ def console_plan(game, hwnd, restore=False):
         if len(nodes) != 1:
             return None
         entry = nodes[0] - 0x10
-        if game.read_abs_u64(entry) != game.base + MODEL_ENTRY_VTABLE:
+        if game.read_abs_u64(entry) != game.base + a.model_entry_vtable:
             return None
         model = game.read_abs_u64(game.read_abs_u64(entry + ENTRY_INSTANCE) + INSTANCE_MODEL)
         box = struct.unpack("<6f", game.read_abs(model + MODEL_BOUNDS, 24))
@@ -484,6 +628,12 @@ def run_helper():
             return
         game = Game()
         try:
+            try:
+                find_addresses(game)
+            except LookupError:
+                return
+            if not game.addr.console:
+                return
             hwnd = game.window()
             while hwnd and user32.IsWindow(hwnd) and is_wide(hwnd):
                 try:
@@ -503,7 +653,6 @@ def print_status(game):
     hwnd = game.window()
     cap_rva, sites = game.locate_cap()
     cap = struct.unpack("<f", game.read(cap_rva, 4))[0] if cap_rva else None
-    sw, sh = game.read_u32(STORED_WIDTH), game.read_u32(STORED_HEIGHT)
     print(f"StarCraft II build {game.build}, pid {game.pid}")
     if cap_rva:
         print(f"aspect cap: {cap:.4f} at SC2_x64.exe+0x{cap_rva:X} (read-only; via {', '.join(sites)})")
@@ -511,9 +660,16 @@ def print_status(game):
         cw, ch = window_size(hwnd)
         _, _, mw, mh = monitor_rect(hwnd)
         print(f"window: {cw}x{ch} on a {mw}x{mh} monitor  ->  widescreen {'ON' if is_wide(hwnd) else 'off'}")
-    print(f"engine stored size: {sw}x{sh}")
-    if hwnd and game.build == BUILD:
-        print(f"bottom console: {console_state(game, hwnd)}")
+    try:
+        a = find_addresses(game)
+    except LookupError as e:
+        print(f"writable addresses: not found in this build ({e}); apply and revert will refuse to run")
+    else:
+        print(f"engine stored size: {game.read_u32(a.stored_width)}x{game.read_u32(a.stored_height)}")
+        if hwnd and a.console:
+            print(f"bottom console: {console_state(game, hwnd)}")
+        elif not a.console:
+            print(f"bottom console: fix unavailable in this build ({a.console_error})")
     print(f"console helper: {'running' if helper_running() else 'not running'}")
 
 
@@ -538,10 +694,14 @@ def main():
         hwnd = game.window()
         if not hwnd:
             raise SystemExit("Game window not found.")
-        check_build(game)
+        try:
+            find_addresses(game)
+        except LookupError as e:
+            raise SystemExit(f"Could not find the memory this tool needs in build {game.build} ({e}). "
+                             f"A game patch may have changed that code; nothing was written.")
         _, _, mw, mh = monitor_rect(hwnd)
         if args.cmd == "apply":
-            if game.read_u32(0x3A0DEA4) != 1:
+            if game.read_u32(game.addr.display_mode) != DISPLAY_WINDOWED:
                 print("note: set Display Mode to Windowed (Fullscreen) for this to hold.")
             accepted, ms = set_window(game, hwnd, mw, mh, bypass=True)
             cw, ch = window_size(hwnd)
