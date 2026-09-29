@@ -4,6 +4,8 @@ StarCraft II limits its view to 16:9. On a wider monitor you get black bars on t
 
 It is a small Python tool. It switches two internal game settings on for a fraction of a second, resizes the game window, and switches them back. It then leaves a small helper running in the background that changes two numbers on the bottom console each time a mission loads, and stops when you close the game. It does not modify any game files, and closing the game undoes the change.
 
+![A campaign mission at 32:9 with the bottom console framed from the minimap to the command card](images/campaign-32-9.webp)
+
 ## Risks and disclaimer
 
 Read this section before you run anything.
