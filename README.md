@@ -17,6 +17,8 @@ It is a small Python tool. It switches two internal game settings on for a fract
 
 **Use it at your own risk. I am not responsible if your Battle.net account is suspended or banned, or if the game crashes and you lose progress.**
 
+I accepted that risk for my own Battle.net account. At the time of writing (September 2026), I can still play on it. I will update this README if anything changes on my account or if I hear of anyone being banned. **If you use it and get banned, that is on you, and I am not responsible.**
+
 ## Tested resolutions
 
 Tested on StarCraft II 5.0.16 (build 97563), 64-bit client, Windows 11, Direct3D 9 renderer, in Windowed (Fullscreen) mode.
