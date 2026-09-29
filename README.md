@@ -8,14 +8,14 @@ It is a small Python tool. It switches two internal game settings on for a fract
 
 ## Risks and disclaimer
 
-Read this section before you run anything.
+**Read this section before you run anything.**
 
-- This program changes the memory of a running StarCraft II client. Blizzard's terms of use forbid third-party programs that modify the game. Your Battle.net account can be suspended or banned for it, including when you only play single-player content. StarCraft II runs anti-cheat checks while you are connected to Battle.net, and nobody outside Blizzard knows exactly what they look for.
-- The two settings it switches belong to StarCraft II's built-in client API, the interface Blizzard provides for bots and machine-learning research. While they are on, parts of the game behave as if that API were active. They stay on until the game accepts the new window size, which usually takes well under a second. No side effects showed up in testing, but a crash is possible. Save before you run it during a mission.
+- This program changes the memory of a running StarCraft II client. Blizzard's terms of use forbid third-party programs that modify the game. **Your Battle.net account can be suspended or banned for it, including when you only play single-player content.** StarCraft II runs anti-cheat checks while you are connected to Battle.net, and nobody outside Blizzard knows exactly what they look for.
+- The two settings it switches belong to StarCraft II's built-in client API, the interface Blizzard provides for bots and machine-learning research. While they are on, parts of the game behave as if that API were active. They stay on until the game accepts the new window size, which usually takes well under a second. No side effects showed up in testing, but **a crash is possible. Save before you run it during a mission.**
 - `apply` leaves a small helper running in the background until you close StarCraft II. Each time a mission loads, the helper writes two numbers and one flag into the game's memory to stretch the bottom console, so the tool keeps writing into the game over your whole session, not only once.
-- A wider view shows more of the map, which is an unfair advantage against other players. The tool does not check what you are playing, and the window stays wide until you run `revert` or restart StarCraft II. Do one of those before you play any game with other people.
+- A wider view shows more of the map, which is an unfair advantage against other players. The tool does not check what you are playing, and the window stays wide until you run `revert` or restart StarCraft II. **Do one of those before you play any game with other people.**
 
-Use it at your own risk. I am not responsible if your Battle.net account is suspended or banned, or if the game crashes and you lose progress.
+**Use it at your own risk. I am not responsible if your Battle.net account is suspended or banned, or if the game crashes and you lose progress.**
 
 ## Tested resolutions
 
@@ -100,7 +100,7 @@ To go back to the normal 16:9 window, for example before you play against other 
 python sc2_ultrawide.py revert
 ```
 
-Read the [risks and disclaimer](#risks-and-disclaimer) before you use this.
+**Read the [risks and disclaimer](#risks-and-disclaimer) before you use this.**
 
 ## Usage
 
