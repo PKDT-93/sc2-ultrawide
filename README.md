@@ -145,8 +145,6 @@ APIs and tools used:
 Reading memory never needs write access, so the parts that only read cannot change the game. Only `apply` opens the game for writing, and it changes only those two settings. `revert` writes nothing; it only resizes the window.
 
 ## Known issues
-
-- The bottom HUD framing does not fill the width. The console along the bottom of the screen (minimap frame, unit panel, command card) is built from three fixed-width art pieces that meet at 16:9. At wider sizes they sit at the left edge, the center, and the right edge, with bare dark strips between them: about 1,280 pixels each on 32:9 and about 440 pixels on 3440×1440. Some elements, such as control group tabs, hang past the edge of the art. The strip is most likely the band under the console where the game stops drawing the 3D world. It does not affect gameplay.
 - Exclusive fullscreen is not supported. The Fullscreen display mode has its own 16:9 limit with no exception, so use Windowed (Fullscreen).
 - Only game build 97563 is supported. On any other build, `status` still reports the aspect limit, but `apply` stops before it writes anything, because the writable addresses match build 97563 only. The addresses at the top of `sc2_ultrawide.py` (`LISTEN_OBJECT` through `STORED_HEIGHT`) would need to be found again for the new build.
 
