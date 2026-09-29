@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 
-from .game import Game, is_wide, window_size
+from .game import Game, is_wide, wider_than_cap, window_size
 from .memory import find_addresses
 from .winapi import CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS, ERROR_ALREADY_EXISTS, SYNCHRONIZE, kernel32, user32
 
@@ -57,9 +57,9 @@ def console_target(width, height, min_x, max_x):
     in normalised screen units (-1 is the left edge, +1 the right edge). Keeping each end at its
     16:9 distance from its own screen edge makes the side pieces overlap it exactly as at 16:9.
     """
-    w16 = 16 / 9 * height
-    if width <= w16 + 0.5:
+    if not wider_than_cap(width, height):
         return CONSOLE_DEFAULT
+    w16 = 16 / 9 * height
     unit = 2 / 3 * height
     left = w16 / 2 + min_x * unit
     right = width - w16 / 2 + max_x * unit

@@ -115,9 +115,13 @@ def window_size(hwnd):
     return rect.right - rect.left, rect.bottom - rect.top
 
 
+def wider_than_cap(width, height):
+    """True if a width x height window is wider than the game's own aspect limit."""
+    return bool(height) and width / height > ORIGINAL_MAX_ASPECT + 0.01
+
+
 def is_wide(hwnd):
-    cw, ch = window_size(hwnd)
-    return bool(ch) and cw / ch > ORIGINAL_MAX_ASPECT + 0.01
+    return wider_than_cap(*window_size(hwnd))
 
 
 def set_window(game, hwnd, width, height, bypass, timeout=10.0):
