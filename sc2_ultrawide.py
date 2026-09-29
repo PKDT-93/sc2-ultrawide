@@ -1,5 +1,4 @@
-"""StarCraft II ultrawide unlock for single-player, memory only.
-
+"""
 StarCraft II caps its window and back buffer at a 1366:768 (~1.7786) aspect ratio. That
 cap is a single read-only constant in SC2_x64.exe, but the executable maps its code and
 constants as a copy-protected view whose maximum page protection is execute-read, so an
