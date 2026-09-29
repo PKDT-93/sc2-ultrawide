@@ -1,8 +1,8 @@
 # sc2-ultrawide
 
-StarCraft II limits its view to 16:9. On a wider monitor you get black bars on the sides or a stretched picture. This tool removes that limit while the game is running, so the game fills a 21:9 or 32:9 screen and the camera shows more of the screen.
+StarCraft II limits its view to 16:9. On a wider monitor you get black bars on the sides or a stretched picture. This tool removes that limit while the game is running, so the game fills a 21:9 or 32:9 screen and the camera shows more of the screen. It also stretches the middle of the bottom console so the HUD frame reaches from the minimap to the command card instead of breaking into three pieces.
 
-It is one Python script. It switches two internal game settings on for a fraction of a second, resizes the game window, and switches them back. It does not modify any game files, and closing the game undoes the change.
+It is one Python script. It switches two internal game settings on for a fraction of a second, resizes the game window, and switches them back. With `watch`, it also changes two numbers on the bottom console each time a mission loads. It does not modify any game files, and closing the game undoes the change.
 
 ## Risks and disclaimer
 
@@ -10,6 +10,7 @@ Read this section before you run anything.
 
 - This program changes the memory of a running StarCraft II client. Blizzard's terms of use forbid third-party programs that modify the game. Your Battle.net account can be suspended or banned for it, including when you only play single-player content. StarCraft II runs anti-cheat checks while you are connected to Battle.net, and nobody outside Blizzard knows exactly what they look for.
 - The two settings it switches belong to StarCraft II's built-in client API, the interface Blizzard provides for bots and machine-learning research. While they are on, parts of the game behave as if that API were active. They stay on until the game accepts the new window size, which usually takes well under a second. No side effects showed up in testing, but a crash is possible. Save before you run it during a mission.
+- `watch` keeps running while you play. Each time a mission loads, it writes two numbers and one flag into the game's memory to stretch the bottom console. That is more writing into the game than `apply` alone, spread over your whole session.
 - A wider view shows more of the map, which is an unfair advantage against other players. The tool does not check what you are playing, and the window stays wide until you run `revert` or restart StarCraft II. Do one of those before you play any game with other people.
 
 Use it at your own risk. I am not responsible if your Battle.net account is suspended or banned, or if the game crashes and you lose progress.
@@ -26,6 +27,8 @@ Tested on StarCraft II 5.0.16 (build 97563), 64-bit client, Windows 11, Direct3D
 | 3840×1600 | 24:10 | Works. The game accepted and stored the exact size. |
 
 The 21:9 and 24:10 rows come from forcing the game window to those sizes on the 5120×1440 monitor. A monitor of that size goes through the same code, but nobody has tried one yet.
+
+The bottom console fix was tested at 5120×1440, 3440×1440 and 2560×1080.
 
 ## Requirements
 
@@ -70,10 +73,11 @@ This section is for people who have never used Python or a command line. Do the 
 3. Type this and press Enter:
 
    ```
-   python sc2_ultrawide.py apply
+   python sc2_ultrawide.py watch
    ```
 
-4. The game window stretches to the full width of your monitor. Load a campaign mission and play.
+4. The game window stretches to the full width of your monitor. Leave the PowerShell window open while you play. It keeps the bottom console framed in every mission. If you close it, the window stays wide, but the gaps in the console come back at the next mission.
+5. Load a campaign mission and play.
 
 If something goes wrong:
 
@@ -86,9 +90,9 @@ If something goes wrong:
 
 ### Every time you play
 
-The change only lasts until you close StarCraft II. Each time you start the game, repeat Step 4 (open PowerShell in the folder and run the `apply` command). You do not need to redo Steps 1 to 3.
+The change only lasts until you close StarCraft II. Each time you start the game, repeat Step 4 (open PowerShell in the folder and run the `watch` command). You do not need to redo Steps 1 to 3.
 
-To go back to the normal 16:9 window, for example before you play against other people, run this in the same PowerShell window:
+To go back to the normal 16:9 window, for example before you play against other people, press Ctrl+C in the PowerShell window to stop `watch`, then run:
 
 ```
 python sc2_ultrawide.py revert
@@ -103,19 +107,20 @@ Read the [risks and disclaimer](#risks-and-disclaimer) before you use this.
 3. From a terminal in this folder, run:
 
    ```
-   python sc2_ultrawide.py apply
+   python sc2_ultrawide.py watch
    ```
 
-The window grows to the full width of your monitor. Play the campaign as usual.
+The window grows to the full width of your monitor, and the bottom console is stretched to fit each time a mission loads. Leave the terminal open while you play; Ctrl+C stops it. Play the campaign as usual.
 
-Two more commands:
+More commands:
 
 ```
-python sc2_ultrawide.py status    # read-only: build, window size, whether the wide mode is on
-python sc2_ultrawide.py revert    # resize the window back to 16:9
+python sc2_ultrawide.py apply     # widen the window only, then exit
+python sc2_ultrawide.py status    # read-only: build, window size, wide mode, console state
+python sc2_ultrawide.py revert    # window back to 16:9, console back to normal
 ```
 
-The change lasts until StarCraft II closes, so run `apply` again after every launch. Anything that resizes the game window, such as changing display settings, makes the game enforce its 16:9 limit again. Run `apply` again if that happens.
+The change lasts until StarCraft II closes, so run `watch` again after every launch. Anything that resizes the game window, such as changing display settings, makes the game enforce its 16:9 limit again. Run `apply` again if that happens; a running `watch` fits the console to the new size by itself.
 
 ## How it works
 
@@ -135,18 +140,29 @@ So `sc2_ultrawide.py apply` does the following:
 
 From then on the game draws at the full width. The 3D camera shows more of the map from side to side, and the interface lays itself out across the whole screen. The game only checks the size again when the window is resized. Running those same steps at several ultrawide sizes, and taking a screenshot with GDI (`BitBlt`) each time, produced the results in the table above.
 
+### The bottom console
+
+The console at the bottom of the screen is made of three small 3D models: the minimap piece, the unit-info piece and the command-card piece, each drawn by its own full-screen model frame. The game pins the minimap piece to the left edge, the unit-info piece to the center and the command-card piece to the right edge, and it sizes all three by the screen height so they keep their shape. Each side piece ends in a wing that reaches toward the middle, long enough to meet the middle piece at 16:9 and no further. On a wider screen the pieces drift apart and leave gaps.
+
+`watch` stretches the middle piece sideways until it reaches both wings again. Each end goes where it would sit on a 16:9 screen, measured from its own screen edge. The side pieces draw on top of the middle one, so its stretched ends stay hidden under the wings and the joins look the same as at 16:9. The amount comes from the middle model's own size, which the game keeps in memory, so it follows the window width.
+
+Each model has a position and a scale in memory, and its frame has a flag that tells the game to rebuild the model's placement on the next frame. `watch` writes a new horizontal scale and position, then sets that flag. The game rebuilds the console from the skin's own values at every mission load, so `watch` checks once a second and stretches it again whenever a new console appears.
+
+These objects were found in the same read-only memory copy. A list of every UI frame in the running game showed that no flat image covered the gaps, which led to the three model frames (`MinimapModel`, `InfopanelModel`, `CommandPanelModel`). Their settings and the code that places each model came from the disassembled game code.
+
 APIs and tools used:
 
-- Windows process and memory: `OpenProcess`, `CreateToolhelp32Snapshot`, `Module32FirstW`, `VirtualQueryEx`, `ReadProcessMemory`, and, only for `apply`, `VirtualProtectEx` and `WriteProcessMemory`.
-- Windows window and screen: `EnumWindows`, `GetWindowRect`, `GetClientRect`, `MonitorFromWindow`, `GetMonitorInfoW`, `SetWindowPos`, and `BitBlt`.
+- Windows process and memory: `OpenProcess`, `CreateToolhelp32Snapshot`, `Module32FirstW`, `VirtualQueryEx`, `ReadProcessMemory`, `VirtualProtectEx` and `WriteProcessMemory` for the two settings, and `WriteProcessMemory` alone for the console.
+- Windows window and screen: `EnumWindows`, `GetWindowRect`, `GetClientRect`, `IsWindow`, `MonitorFromWindow`, `GetMonitorInfoW`, `SetWindowPos`, and `BitBlt`.
 - StarCraft II's own status service at `http://127.0.0.1:6119/game` and `/ui`, used during research to tell the menu apart from a loaded game. The tool itself does not call it.
-- For the disassembly and scanning: `pefile`, `capstone`, and `numpy`.
+- For the disassembly and scanning: `pefile`, `capstone`, and `numpy`. For screenshots during the console research: Windows Graphics Capture, through the `windows-capture` package.
 
-Reading memory never needs write access, so the parts that only read cannot change the game. Only `apply` opens the game for writing, and it changes only those two settings. `revert` writes nothing; it only resizes the window.
+Reading memory never needs write access, so the parts that only read cannot change the game. `apply` opens the game for writing and changes only the two settings. `watch` writes the same two settings when the window still needs widening, and otherwise opens the game for writing only for the moment it stretches the console. `revert` resizes the window and, if the console was stretched, puts it back.
 
 ## Known issues
 - Exclusive fullscreen is not supported. The Fullscreen display mode has its own 16:9 limit with no exception, so use Windowed (Fullscreen).
-- Only game build 97563 is supported. On any other build, `status` still reports the aspect limit, but `apply` stops before it writes anything, because the writable addresses match build 97563 only. The addresses at the top of `sc2_ultrawide.py` (`LISTEN_OBJECT` through `STORED_HEIGHT`) would need to be found again for the new build.
+- Only game build 97563 is supported. On any other build, `status` still reports the aspect limit, but `apply`, `watch` and `revert` stop before they write anything, because the writable addresses match build 97563 only. The addresses near the top of `sc2_ultrawide.py` (`LISTEN_OBJECT` through `MODEL_BOUNDS`) would need to be found again for the new build.
+- The stretched middle piece of the console looks a little smoother and darker than the pieces beside it, because its texture is spread several times wider.
 
 ## Credits
 

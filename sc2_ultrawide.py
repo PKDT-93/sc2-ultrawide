@@ -11,10 +11,16 @@ flags for a few milliseconds, resizes the game window to fill the monitor so the
 accepts the new size, then restores the flags. Nothing on disk changes and the widened size
 is gone when the game closes.
 
+The bottom console is three 3D models (minimap, unit info, command card) pinned to the left
+edge, the center and the right edge and sized by the screen height, so past 16:9 they drift
+apart and leave gaps. `watch` widens the middle model at every mission load so each of its
+ends sits where it would at 16:9, measured from its own screen edge, which closes the gaps.
+
 Commands:
-    python sc2_ultrawide.py status      show build, window size, and whether widescreen is on
-    python sc2_ultrawide.py apply        widen the window to the full monitor
-    python sc2_ultrawide.py revert       resize the window back to 16:9
+    python sc2_ultrawide.py status      show build, window size, widescreen and console state
+    python sc2_ultrawide.py apply       widen the window to the full monitor
+    python sc2_ultrawide.py watch       widen the window, then keep the bottom console framed
+    python sc2_ultrawide.py revert      resize the window back to 16:9 and put the console back
 
 Only Windowed (Fullscreen) display mode is affected. Exclusive fullscreen keeps its own,
 separate 16:9 clamp that this tool does not touch.
@@ -50,6 +56,20 @@ RENDER_OBJECT = 0x43CB460          # engine option "gameStateRender"; its value 
 RENDER_VALUE = 0x43CB4C1
 STORED_WIDTH = 0x581452C           # last window client width the engine accepted
 STORED_HEIGHT = 0x581039C
+
+# Bottom console, build 97563. These are heap objects rebuilt at every mission load, so they are
+# looked up fresh each time and checked by vtable before anything is written.
+GAMEUI_POINTER = 0x4032368         # .data pointer to the game UI object
+GAMEUI_CONSOLE_PANEL = 0xC60       # game UI -> ConsolePanel frame
+PANEL_CENTER_MODEL = 0x138         # ConsolePanel -> model frame that draws the middle console piece
+MODEL_FRAME_VTABLE = 0x2ED5410
+MODEL_FRAME_FLAGS = 0x214
+TRANSFORMS_DIRTY = 0x04            # model frame flag: rebuild model transforms on the next frame
+MODEL_FRAME_BUCKETS = 0x1F0        # model list: bucket count here, bucket array pointer at +0x10
+MODEL_ENTRY_VTABLE = 0x2ED5400
+ENTRY_INSTANCE, ENTRY_POSITION, ENTRY_SCALE = 0x20, 0x28, 0x34
+INSTANCE_MODEL, MODEL_BOUNDS = 0x150, 0x430   # instance -> model data -> min(x,y,z), max(x,y,z)
+CONSOLE_DEFAULT = (0.0, 1.0)       # middle piece position.x and scale.x in the console skins
 
 PROCESS_VM_OPERATION = 0x0008
 PROCESS_VM_READ = 0x0010
@@ -109,6 +129,7 @@ kernel32.CloseHandle.argtypes = [wt.HANDLE]
 user32.EnumWindows.argtypes = [ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM), wt.LPARAM]
 user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
 user32.IsWindowVisible.argtypes = [wt.HWND]
+user32.IsWindow.argtypes = [wt.HWND]
 user32.GetWindowRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
 user32.GetClientRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
 user32.MonitorFromWindow.restype = wt.HANDLE
@@ -182,6 +203,15 @@ class Game:
 
     def read_u32(self, rva):
         return struct.unpack("<I", self.read(rva, 4))[0]
+
+    def read_abs_u64(self, addr):
+        return struct.unpack("<Q", self.read_abs(addr, 8))[0]
+
+    def write_abs(self, addr, data):
+        """Write to heap memory, which is writable without a protection change."""
+        done = ctypes.c_size_t()
+        if not kernel32.WriteProcessMemory(self.handle, ctypes.c_void_p(addr), data, len(data), ctypes.byref(done)):
+            raise ctypes.WinError(ctypes.get_last_error())
 
     def write(self, rva, data):
         addr = ctypes.c_void_p(self.base + rva)
@@ -318,6 +348,96 @@ def set_window(game, hwnd, width, height, bypass, timeout=10.0):
     return accepted, (time.perf_counter() - t0) * 1000
 
 
+def is_wide(hwnd):
+    cw, ch = window_size(hwnd)
+    return bool(ch) and cw / ch > ORIGINAL_MAX_ASPECT + 0.01
+
+
+def console_target(width, height, min_x, max_x):
+    """Position.x and scale.x that put the middle console piece's ends where they sit at 16:9.
+
+    The console models are drawn in 4:3 units (one unit is 2/3 of the screen height) at positions
+    in normalised screen units (-1 is the left edge, +1 the right edge). Keeping each end at its
+    16:9 distance from its own screen edge makes the side pieces overlap it exactly as at 16:9.
+    """
+    w16 = 16 / 9 * height
+    if width <= w16 + 0.5:
+        return CONSOLE_DEFAULT
+    unit = 2 / 3 * height
+    left = w16 / 2 + min_x * unit
+    right = width - w16 / 2 + max_x * unit
+    scale = (right - left) / ((max_x - min_x) * unit)
+    return (left - min_x * scale * unit) / (width / 2) - 1, scale
+
+
+def console_plan(game, hwnd, restore=False):
+    """Return (frame, entry, current, wanted) for the middle console piece, or None outside a mission.
+
+    `current` and `wanted` are (position.x, scale.x) pairs.
+    """
+    try:
+        ui = struct.unpack("<Q", game.read(GAMEUI_POINTER, 8))[0]
+        panel = game.read_abs_u64(ui + GAMEUI_CONSOLE_PANEL)
+        frame = game.read_abs_u64(panel + PANEL_CENTER_MODEL) & ~1
+        if game.read_abs_u64(frame) != game.base + MODEL_FRAME_VTABLE:
+            return None
+        count = struct.unpack("<I", game.read_abs(frame + MODEL_FRAME_BUCKETS, 4))[0]
+        buckets = game.read_abs_u64(frame + MODEL_FRAME_BUCKETS + 0x10)
+        if not buckets or not 0 < count <= 256:
+            return None
+        nodes = [n for n in struct.unpack(f"<{count}Q", game.read_abs(buckets, 8 * count)) if n]
+        if len(nodes) != 1:
+            return None
+        entry = nodes[0] - 0x10
+        if game.read_abs_u64(entry) != game.base + MODEL_ENTRY_VTABLE:
+            return None
+        model = game.read_abs_u64(game.read_abs_u64(entry + ENTRY_INSTANCE) + INSTANCE_MODEL)
+        box = struct.unpack("<6f", game.read_abs(model + MODEL_BOUNDS, 24))
+        current = (struct.unpack("<f", game.read_abs(entry + ENTRY_POSITION, 4))[0],
+                   struct.unpack("<f", game.read_abs(entry + ENTRY_SCALE, 4))[0])
+    except (OSError, struct.error):
+        return None
+    min_x, max_x = box[0], box[3]
+    width, height = window_size(hwnd)
+    if not (-3 < min_x < 0 < max_x < 3) or not height:
+        return None
+    wanted = CONSOLE_DEFAULT if restore else console_target(width, height, min_x, max_x)
+    return frame, entry, current, wanted
+
+
+def same(a, b):
+    return all(abs(x - y) < 1e-4 for x, y in zip(a, b))
+
+
+def fix_console(game, hwnd, restore=False):
+    """Fit the middle console piece to the window, or put it back. Returns the values written, or None."""
+    plan = console_plan(game, hwnd, restore)
+    if not plan or same(plan[2], plan[3]):
+        return None
+    frame, entry, _, (pos_x, scale_x) = plan
+    writer = Game(write=True)
+    try:
+        writer.write_abs(entry + ENTRY_SCALE, struct.pack("<f", scale_x))
+        writer.write_abs(entry + ENTRY_POSITION, struct.pack("<f", pos_x))
+        flags = writer.read_abs(frame + MODEL_FRAME_FLAGS, 1)[0]
+        writer.write_abs(frame + MODEL_FRAME_FLAGS, bytes([flags | TRANSFORMS_DIRTY]))
+    finally:
+        writer.close()
+    return pos_x, scale_x
+
+
+def console_state(game, hwnd):
+    plan = console_plan(game, hwnd)
+    if not plan:
+        return "not in a mission"
+    _, _, current, wanted = plan
+    if same(current, wanted):
+        return "normal" if same(wanted, CONSOLE_DEFAULT) else f"framed (middle piece widened {current[1]:.2f}x)"
+    if same(current, CONSOLE_DEFAULT):
+        return "gaps between the pieces (run watch)"
+    return "widened for a different window size (run watch or revert)"
+
+
 def print_status(game):
     hwnd = game.window()
     cap_rva, sites = game.locate_cap()
@@ -329,9 +449,10 @@ def print_status(game):
     if hwnd:
         cw, ch = window_size(hwnd)
         _, _, mw, mh = monitor_rect(hwnd)
-        wide = ch and cw / ch > ORIGINAL_MAX_ASPECT + 0.01
-        print(f"window: {cw}x{ch} on a {mw}x{mh} monitor  ->  widescreen {'ON' if wide else 'off'}")
+        print(f"window: {cw}x{ch} on a {mw}x{mh} monitor  ->  widescreen {'ON' if is_wide(hwnd) else 'off'}")
     print(f"engine stored size: {sw}x{sh}")
+    if hwnd and game.build == BUILD:
+        print(f"bottom console: {console_state(game, hwnd)}")
 
 
 def main():
@@ -339,12 +460,13 @@ def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("status", help="show build, window size, and whether widescreen is on")
+    sub.add_parser("status", help="show build, window size, widescreen and console state")
     sub.add_parser("apply", help="widen the window to the full monitor")
-    sub.add_parser("revert", help="resize the window back to 16:9")
+    sub.add_parser("watch", help="widen the window, then keep the bottom console framed until the game closes")
+    sub.add_parser("revert", help="resize the window back to 16:9 and put the console back")
     args = parser.parse_args()
 
-    game = Game(write=args.cmd != "status")
+    game = Game(write=args.cmd == "apply")
     try:
         if args.cmd == "status":
             print_status(game)
@@ -361,11 +483,35 @@ def main():
             cw, ch = window_size(hwnd)
             print(f"apply: window {cw}x{ch} ({'ok' if accepted else 'not accepted'}), "
                   f"flags set for {ms:.0f} ms")
+        elif args.cmd == "watch":
+            if not is_wide(hwnd):
+                writer = Game(write=True)
+                try:
+                    accepted, ms = set_window(writer, hwnd, mw, mh, bypass=True)
+                finally:
+                    writer.close()
+                cw, ch = window_size(hwnd)
+                print(f"watch: window {cw}x{ch} ({'ok' if accepted else 'not accepted'}), "
+                      f"flags set for {ms:.0f} ms")
+            print("watch: keeping the bottom console framed. Leave this open while you play; Ctrl+C stops it.")
+            try:
+                while user32.IsWindow(hwnd):
+                    written = fix_console(game, hwnd)
+                    if written:
+                        cw, ch = window_size(hwnd)
+                        print(f"{time.strftime('%H:%M:%S')} bottom console fitted to {cw}x{ch} "
+                              f"(middle piece {written[1]:.2f}x wide)")
+                    time.sleep(1.0)
+                print("watch: StarCraft II closed.")
+            except KeyboardInterrupt:
+                print("watch: stopped. The console stays as it is until the next mission loads.")
         elif args.cmd == "revert":
             width = round(mh * ORIGINAL_MAX_ASPECT)
             accepted, _ = set_window(game, hwnd, width, mh, bypass=False, timeout=3.0)
             cw, ch = window_size(hwnd)
             print(f"revert: window {cw}x{ch} (16:9)")
+            if fix_console(game, hwnd, restore=True):
+                print("revert: bottom console put back")
     finally:
         game.close()
 
