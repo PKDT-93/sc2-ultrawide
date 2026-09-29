@@ -4,11 +4,3 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
-
-# Local memory dump of the running game (large, and contains decrypted game code).
-# Regenerate it yourself with tools/dump_sc2.py.
-dumps/
-*.bin
-
-# Screenshots captured during testing (may show your desktop).
-shots/

@@ -44,7 +44,6 @@ import sys
 import time
 
 GAME_EXE = "SC2_x64.exe"
-BUILD = "97563"                    # the build this was tested on (addresses are found at run time)
 ORIGINAL_MAX_ASPECT = struct.unpack("<f", struct.pack("<I", 0x3FE3AAAB))[0]  # 1366 / 768
 
 # Read-only aspect-ratio cap, found by signature (build independent). Used for `status` only;

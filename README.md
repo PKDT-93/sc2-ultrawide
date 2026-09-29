@@ -33,7 +33,7 @@ The bottom console fix was tested at 5120×1440, 3440×1440 and 2560×1080.
 ## Requirements
 
 - Windows, 64-bit (tested on Windows 11)
-- StarCraft II 64-bit client. Tested on build 97563 (patch 5.0.16). The tool finds the memory it needs in the running game each time, so it should keep working after a patch; see [known issues](#known-issues).
+- StarCraft II, 64-bit client. The tool finds the memory it needs in the running game, so it does not need updating for new game builds; see [known issues](#known-issues).
 - Python 3 (tested with 3.14). The script uses only the standard library.
 - Display Mode set to Windowed (Fullscreen)
 
@@ -170,7 +170,7 @@ Reading memory never needs write access, so the parts that only read cannot chan
 
 ## Known issues
 - Exclusive fullscreen is not supported. The Fullscreen display mode has its own 16:9 limit with no exception, so use Windowed (Fullscreen).
-- Only build 97563 has been tested. The tool does not store any memory addresses; each run finds them by recognizing the game code that uses them, so a new patch should work without an update. If a patch changes that code, `apply` and `revert` stop before they write anything and name the part they could not find. The offsets inside the console's model objects (near the top of `sc2_ultrawide.py`) are still fixed, but they only change if Blizzard changes those objects, and a mismatch makes the tool leave the console alone.
+- The tool recognizes specific game code to find the memory it needs. If a game patch changes that code, `apply` and `revert` stop before they write anything and name the part they could not find.
 - The stretched middle piece of the console looks a little smoother and darker than the pieces beside it, because its texture is spread several times wider.
 
 ## Credits
