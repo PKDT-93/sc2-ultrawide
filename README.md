@@ -2,7 +2,7 @@
 
 StarCraft II limits its view to 16:9. On a wider monitor you get black bars on the sides or a stretched picture. This tool removes that limit while the game is running, so the game fills a 21:9 or 32:9 screen and the camera shows more of the screen. It also stretches the middle of the bottom console so the HUD frame reaches from the minimap to the command card instead of breaking into three pieces.
 
-It is one Python script. It switches two internal game settings on for a fraction of a second, resizes the game window, and switches them back. It then leaves a small helper running in the background that changes two numbers on the bottom console each time a mission loads, and stops when you close the game. It does not modify any game files, and closing the game undoes the change.
+It is a small Python tool. It switches two internal game settings on for a fraction of a second, resizes the game window, and switches them back. It then leaves a small helper running in the background that changes two numbers on the bottom console each time a mission loads, and stops when you close the game. It does not modify any game files, and closing the game undoes the change.
 
 ## Risks and disclaimer
 
@@ -34,7 +34,7 @@ The bottom console fix was tested at 5120×1440, 3440×1440 and 2560×1080.
 
 - Windows, 64-bit (tested on Windows 11)
 - StarCraft II, 64-bit client. The tool finds the memory it needs in the running game, so it does not need updating for new game builds; see [known issues](#known-issues).
-- Python 3 (tested with 3.14). The script uses only the standard library.
+- Python 3 (tested with 3.14). The tool uses only the standard library.
 - Display Mode set to Windowed (Fullscreen)
 
 ## Beginner guide for Windows
@@ -58,7 +58,7 @@ This section is for people who have never used Python or a command line. Do the 
 
 1. Open the [project page](https://github.com/PKDT-93/sc2-ultrawide).
 2. Click the green **Code** button, then **Download ZIP**.
-3. Open your Downloads folder, right-click the ZIP file, and choose **Extract All...**, then **Extract**. You now have a normal folder called `sc2-ultrawide-main` that contains `sc2_ultrawide.py`.
+3. Open your Downloads folder, right-click the ZIP file, and choose **Extract All...**, then **Extract**. You now have a normal folder called `sc2-ultrawide-main` that contains `sc2_ultrawide.py` and a folder called `ultrawide`. Keep them together: the script needs that folder next to it.
 
 ### Step 3: Set up StarCraft II
 
@@ -151,7 +151,7 @@ These objects were found in the same read-only memory copy. A list of every UI f
 
 ### Finding the addresses on each run
 
-Every memory address the tool writes to moves when Blizzard ships a new build, so none of them are stored in the script. Each run reads the game's code from memory and finds them by recognizing the code that uses them:
+Every memory address the tool writes to moves when Blizzard ships a new build, so none of them are stored in the code. Each run reads the game's code from memory and finds them by recognizing the code that uses them:
 
 - The window-size check, the same code `status` uses to find the aspect limit, reads the engine's stored window size and the display mode in its first few instructions. It also calls a small function that checks the two client-API settings, and each of those settings is read by a one-line function, which gives its address.
 - Each setting's owner is then found by name (`listen`, `gameStateRender` and `displaymode`) just before its value, which also confirms the address is right.
@@ -172,6 +172,14 @@ Reading memory never needs write access, so the parts that only read cannot chan
 - Exclusive fullscreen is not supported. The Fullscreen display mode has its own 16:9 limit with no exception, so use Windowed (Fullscreen).
 - The tool recognizes specific game code to find the memory it needs. If a game patch changes that code, `apply` and `revert` stop before they write anything and name the part they could not find.
 - The stretched middle piece of the console looks a little smoother and darker than the pieces beside it, because its texture is spread several times wider.
+
+## Project layout
+
+- `sc2_ultrawide.py`: the commands (`status`, `apply` and `revert`). This is the file you run.
+- `ultrawide/game.py`: the game handle. Finds the running StarCraft II process and its window, and resizes the window.
+- `ultrawide/memory.py`: reads and writes the game's memory, and finds the addresses the tool needs. It is the only file that holds game-code patterns.
+- `ultrawide/ui.py`: the in-game UI. Fits the bottom console, and runs the background helper that fits it again after each mission load.
+- `ultrawide/winapi.py`: the Windows API declarations the other files share.
 
 ## Credits
 
