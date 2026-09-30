@@ -30,7 +30,7 @@ MODEL_FRAME_FLAGS = 0x214          # model frame flags dword
 TRANSFORMS_DIRTY = 0x04            # ...its bit that makes the engine rebuild the model transform
 MODEL_FRAME_BUCKETS = 0x1F0        # model list: bucket count here, bucket array pointer at +0x10
 ENTRY_INSTANCE, ENTRY_POSITION, ENTRY_SCALE = 0x20, 0x28, 0x34   # model entry fields
-INSTANCE_MODEL, MODEL_BOUNDS = 0x150, 0x430   # instance -> model data -> min(x,y,z), max(x,y,z)
+INSTANCE_MODEL, MODEL_BOUNDS = 0x150, 0x88    # instance -> model data -> min(x,y,z), max(x,y,z)
 CONSOLE_DEFAULT = (0.0, 1.0)       # middle piece position.x and scale.x in the console skins
 IDENT = re.compile(rb"[A-Za-z][A-Za-z0-9_]{1,63}\0")
 
