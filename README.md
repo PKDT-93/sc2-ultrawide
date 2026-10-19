@@ -1,5 +1,37 @@
 # sc2-ultrawide
 
+## China client build 98370 preview branch
+
+This branch adds signature support observed on the China client build 98370.
+See [Chinese setup and test limitations](README.zh-CN.md).
+The executable's file metadata reports 5.0.15.98370; the user reports 5.0.17.98370
+in their installation. Compatibility here is described by the loaded build, not that version label.
+The optional health-bar preview adds exact-build native drawing callbacks for 3440×1440:
+it scales recognized segmented and composite status geometry horizontally, including borders
+and gaps, while preserving cell counts, colors, Y/Z and UVs. It must be enabled separately and
+requires the GUI to remain open. See [preview instructions](README.healthbars-preview.zh-CN.md)
+and [native callback review notes](NATIVE_HEALTHBARS.md).
+**Transport cargo/loading slots remain distorted (reported on the Warp Prism); this preview
+does not fix them.** Unsegmented bars and other builds/resolutions remain unsupported by this feature.
+A subsequent mission transition automatically refitted the HUD with one helper process;
+duplicate apply did not spawn a second helper. Other skins, restart behavior and long-term
+stability remain unverified. Game-exit cleanup is covered by a mocked test, not a live shutdown.
+The Portable build (`SC2-Ultrawide-Portable.exe`) bundles Python and Tk using PyInstaller;
+no Python installation or adjacent source files are required. Build with `build-portable.ps1`
+after installing `requirements-build.txt` in `.venv-build`. The older preview.2 C# launcher
+still requires installed Python and adjacent sources. Logs are stored beside the executable.
+
+The separate `SC2-Ultrawide-Healthbars-Preview.exe` is built with
+`build-portable.ps1 -HealthbarsPreview`. Its callbacks change writable object vtable pointers
+and execute newly allocated code, which is a deeper modification than the original HUD fix.
+It is not an account-safety guarantee. All 28 offline tests, including native child-process
+contracts, pass; live injury/mission-transition observations and a packaged 15-second run
+were checked. See the preview documentation for remaining limits.
+
+Use `python sc2_ultrawide.py apply --no-helper` to fit the current console once without
+starting a background helper. The original `apply` helper behavior remains opt-in through
+running `apply` without this option. This is a preview, not an account-safety guarantee.
+
 StarCraft II limits its view to 16:9. On a wider monitor you get black bars on the sides or a stretched picture. This tool removes that limit while the game is running, so the game fills a 21:9 or 32:9 screen and the camera shows more of the screen. It also stretches the middle of the bottom console so the HUD frame reaches from the minimap to the command card instead of breaking into three pieces.
 
 It is a small Python tool. It switches two internal game settings on for a fraction of a second, resizes the game window, and switches them back. It then leaves a small helper running in the background that changes two numbers on the bottom console each time a mission loads, and stops when you close the game. It does not modify any game files, and closing the game undoes the change.

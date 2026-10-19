@@ -14,6 +14,7 @@ import struct
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 from .game import Game, is_wide, wider_than_cap, window_size
 from .memory import find_addresses
@@ -37,6 +38,17 @@ IDENT = re.compile(rb"[A-Za-z][A-Za-z0-9_]{1,63}\0")
 HELPER_FLAG = "--console-helper"   # internal: run as the background console helper
 HELPER_MUTEX = "sc2_ultrawide_console_helper"
 ENTRY_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sc2_ultrawide.py")
+APP_DIRECTORY = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(ENTRY_SCRIPT)
+
+
+def helper_log(message):
+    directory = os.environ.get("SC2_ULTRAWIDE_LOG_DIR", os.path.join(APP_DIRECTORY, "logs"))
+    try:
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "helper.log"), "a", encoding="utf-8") as stream:
+            stream.write(datetime.now().astimezone().isoformat(timespec="seconds") + " " + message + "\n")
+    except OSError:
+        pass
 
 
 def frame_name(game, frame):
@@ -115,7 +127,7 @@ def fix_console(game, hwnd, restore=False):
     if not plan or same(plan[2], plan[3]):
         return None
     frame, entry, _, (pos_x, scale_x) = plan
-    writer = Game(write=True)
+    writer = Game(write=True, pid=game.pid)
     try:
         writer.write_abs(entry + ENTRY_SCALE, struct.pack("<f", scale_x))
         writer.write_abs(entry + ENTRY_POSITION, struct.pack("<f", pos_x))
@@ -147,8 +159,14 @@ def helper_running():
 
 def start_helper():
     """Start the console helper as a detached background process with no window."""
+    frozen = getattr(sys, "frozen", False)
+    command = [sys.executable, HELPER_FLAG] if frozen else [sys.executable, ENTRY_SCRIPT, HELPER_FLAG]
+    environment = os.environ.copy()
+    if frozen:
+        # The helper outlives the GUI: give its onefile runtime independent temp files.
+        environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     return subprocess.Popen(
-        [sys.executable, ENTRY_SCRIPT, HELPER_FLAG],
+        command, env=environment,
         creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, close_fds=True,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -169,6 +187,7 @@ def run_helper():
             return
         game = Game()
         try:
+            helper_log(f"started pid={game.pid} build={game.build}")
             try:
                 find_addresses(game)
             except LookupError:
@@ -178,13 +197,17 @@ def run_helper():
             hwnd = game.window()
             while hwnd and user32.IsWindow(hwnd) and is_wide(hwnd):
                 try:
-                    fix_console(game, hwnd)
-                except (Exception, SystemExit):
-                    pass
+                    result = fix_console(game, hwnd)
+                    if result:
+                        helper_log(f"HUD fitted position={result[0]:.6f} scale={result[1]:.6f}")
+                except (Exception, SystemExit) as error:
+                    helper_log(f"stopping after {type(error).__name__}: {error}")
+                    return
                 time.sleep(1.0)
             if hwnd and user32.IsWindow(hwnd):
                 fix_console(game, hwnd)
         finally:
             game.close()
+            helper_log("stopped")
     finally:
         kernel32.CloseHandle(mutex)

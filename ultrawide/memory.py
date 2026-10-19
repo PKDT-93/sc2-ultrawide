@@ -7,15 +7,16 @@ matches fails safe (the tool refuses to write) instead of writing to the wrong p
 the only file that holds game-code patterns.
 """
 import ctypes
-import ctypes.wintypes as wt
 import re
 import struct
+import math
 
-from .winapi import PAGE_READWRITE, kernel32
+from .winapi import kernel32
 
 # Read-only aspect-ratio cap, found by signature (build independent). Used for `status` only;
 # it lives in copy-protected memory and cannot be written from another process.
 CAP_SIGNATURES = [
+    ("window size clamp (98370)", "F3 0F 10 05 ?? ?? ?? ?? B8 00 04 00 00 3B F0", 4, 8),
     ("window size clamp", "F3 0F 10 0D ?? ?? ?? ?? B8 00 04 00 00 F3 0F 10 15", 4, 8),
     ("fullscreen clamp", "8B 41 24 0F 57 C9 F3 0F 10 15 ?? ?? ?? ?? 0F 57 C0 F3 48 0F 2A C0", 10, 14),
     ("resolution list filter",
@@ -51,19 +52,12 @@ class ProcessMemory:
         done = ctypes.c_size_t()
         if not kernel32.WriteProcessMemory(self.handle, ctypes.c_void_p(addr), data, len(data), ctypes.byref(done)):
             raise ctypes.WinError(ctypes.get_last_error())
+        if done.value != len(data):
+            raise OSError("Incomplete WriteProcessMemory operation")
 
     def write(self, rva, data):
-        addr = ctypes.c_void_p(self.base + rva)
-        old = wt.DWORD()
-        if not kernel32.VirtualProtectEx(self.handle, addr, len(data), PAGE_READWRITE, ctypes.byref(old)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        try:
-            done = ctypes.c_size_t()
-            if not kernel32.WriteProcessMemory(self.handle, addr, data, len(data), ctypes.byref(done)):
-                raise ctypes.WinError(ctypes.get_last_error())
-        finally:
-            restored = wt.DWORD()
-            kernel32.VirtualProtectEx(self.handle, addr, len(data), old.value, ctypes.byref(restored))
+        # Only writable option data is changed; do not alter page protections.
+        self.write_abs(self.base + rva, data)
 
     def section(self, name):
         """Return (rva, bytes) of a whole PE section, read once and cached."""
@@ -111,8 +105,23 @@ def locate_cap(game):
             continue
         m = matches[0]
         disp = struct.unpack_from("<i", code, m + disp_off)[0]
+        target = text_rva + m + next_off + disp
+        # Reject stale templates resolving to a different constant (observed: -1.0).
+        try:
+            value = struct.unpack("<f", game.read(target, 4))[0]
+        except (OSError, struct.error):
+            continue
+        if not math.isfinite(value) or abs(value - 1366 / 768) > 1e-6:
+            continue
+        if name == "window size clamp (98370)":
+            resolve_window(game)
+            anchors = list(re.finditer(
+                rb"\xe8(.{4})\x84\xc0\x74.\xb0\x01\x48\x83\xc4.\x5f\x5e\xc3\x8b\x05",
+                code, re.DOTALL))
+            if len(anchors) != 1 or not 0 < m - anchors[0].start() < 0x200:
+                continue
         sites[name] = text_rva + m
-        targets.add(text_rva + m + next_off + disp)
+        targets.add(target)
     if len(targets) == 1:
         return targets.pop(), sites
     return None, sites
@@ -223,15 +232,30 @@ def resolve_console(game):
         if f[1] - f[0] == f[2] - f[1] == 8 and e[1] - e[0] == e[2] - e[1] == 4 and len(calls) == 1:
             middles.add(f[1])
     middle = only("the console model fields", middles)
-    # A model entry's vtable: stored just before the entry's scale is set to its default of 1.0.
+    entry_vtable = find_model_entry_vtable(text_rva, text, rdata_rva, rdata, game.base)
+    return gameui, panel_field, middle, entry_vtable
+
+
+def find_model_entry_vtable(text_rva, text, rdata_rva, rdata, base):
+    """Find the model entry constructor, validating the vtable and its method targets."""
     vtables = set()
     for m in re.finditer(rb"\xc7\x43\x34\x00\x00\x80\x3f\xc7\x43\x38\x00\x00\x80\x3f", text, re.DOTALL):
-        window = text[m.start() - 0x40: m.start()]
-        leas = list(re.finditer(rb"\x48\x8d\x05(.{4})\x48\x89\x03", window, re.DOTALL))
+        start = max(0, m.start() - 0x40)
+        window = text[start: m.start()]
+        # 98370 inserts mov qword ptr [rip+disp32],0x10 before mov [rbx],rax.
+        # Permit precisely that instruction; do not wildcard arbitrary instructions.
+        leas = list(re.finditer(
+            rb"\x48\x8d\x05(.{4})(?:\x48\xc7\x05.{4}\x10\x00\x00\x00)?\x48\x89\x03",
+            window, re.DOTALL))
         if leas:
-            vtables.add(text_rva + m.start() - 0x40 + rel32(window, leas[-1].start(1)))
-    entry_vtable = only("the model entry vtable", vtables)
-    return gameui, panel_field, middle, entry_vtable
+            candidate = text_rva + start + rel32(window, leas[-1].start(1))
+            if not rdata_rva <= candidate <= rdata_rva + len(rdata) - 24:
+                continue
+            methods = struct.unpack_from("<3Q", rdata, candidate - rdata_rva)
+            if not all(text_rva <= ptr - base < text_rva + len(text) for ptr in methods):
+                continue
+            vtables.add(candidate)
+    return only("the model entry vtable", vtables)
 
 
 def find_addresses(game):

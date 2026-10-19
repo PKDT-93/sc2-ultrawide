@@ -32,8 +32,8 @@ DISPLAY_WINDOWED = 1               # displaymode value for Windowed (Fullscreen)
 class Game(ProcessMemory):
     """A handle onto the running StarCraft II process. RVAs are offsets from the module base."""
 
-    def __init__(self, write=False):
-        self.pid = self._find_pid()
+    def __init__(self, write=False, pid=None):
+        self.pid = self._find_pid() if pid is None else pid
         access = PROCESS_QUERY_INFORMATION | PROCESS_VM_READ
         if write:
             access |= PROCESS_VM_OPERATION | PROCESS_VM_WRITE
@@ -151,7 +151,15 @@ def set_window(game, hwnd, width, height, bypass, timeout=10.0):
             time.sleep(0.002)
     finally:
         if bypass:
-            game.write(a.listen_value, orig_listen[:4])
-            game.write(a.listen_value + 8, orig_listen[8:])
-            game.write(a.render_value, orig_render)
+            errors = []
+            for rva, data in ((a.render_value, orig_render),
+                              (a.listen_value + 8, orig_listen[8:]),
+                              (a.listen_value, orig_listen[:4])):
+                try:
+                    game.write(rva, data)
+                except OSError as error:
+                    errors.append(str(error))
+            if errors:
+                raise RuntimeError("Could not restore all temporary flags; close StarCraft II: "
+                                   + "; ".join(errors))
     return accepted, (time.perf_counter() - t0) * 1000
